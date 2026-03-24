@@ -153,7 +153,8 @@ authorizeMPToken(
         {
             auto const mptokenKey = keylet::mptoken(mptIssuanceID, account);
             auto const sleMpt = view.peek(mptokenKey);
-            if (!sleMpt || (*sleMpt)[sfMPTAmount] != 0 || (*sleMpt)[~sfLockedAmount].value_or(0) != 0)
+            if (!sleMpt || (*sleMpt)[sfMPTAmount] != 0 ||
+                (*sleMpt)[~sfLockedAmount].value_or(0) != 0)
                 return tecINTERNAL;  // LCOV_EXCL_LINE
 
             if (!view.dirRemove(

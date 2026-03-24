@@ -5263,8 +5263,7 @@ class Vault_test : public beast::unit_test::suite
         auto const shareMptID = vaultSle->at(sfShareMPTID);
         MPTIssue const shareIssue{shareMptID};
         // Depositor deposits 1000 asset units into vault, receiving shares
-        env(vault.deposit(
-            {.depositor = depositor, .id = keylet.key, .amount = asset(1000)}));
+        env(vault.deposit({.depositor = depositor, .id = keylet.key, .amount = asset(1000)}));
         env.close();
         // Check depositor has shares
         {
@@ -5288,10 +5287,7 @@ class Vault_test : public beast::unit_test::suite
             BEAST_EXPECT(sleMpt->at(sfMPTAmount) == 500);
         }
         // Withdraw remaining spendable shares — triggers removeEmptyHolding
-        env(vault.withdraw(
-                {.depositor = depositor,
-                 .id = keylet.key,
-                 .amount = asset(500)}),
+        env(vault.withdraw({.depositor = depositor, .id = keylet.key, .amount = asset(500)}),
             ter(tesSUCCESS));
         env.close();
         // With the fix applied, MPToken must still exist with sfLockedAmount > 0
