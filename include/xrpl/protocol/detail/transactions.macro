@@ -1194,6 +1194,47 @@ TRANSACTION(ttSPONSORSHIP_SET, 91, SponsorshipSet,
     {sfRemainingOwnerCount, SoeOptional},
 }))
 
+/** This transaction posts an unsigned transaction on-ledger as a
+    TransactionProposal, pending multi-signature collection. */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/proposal/TransactionProposalCreate.h>
+#endif
+TRANSACTION(ttTRANSACTION_PROPOSAL_CREATE, 92, TransactionProposalCreate,
+    Delegation::NotDelegable,
+    featureCosigner,
+    NoPriv,
+    ({
+    {sfRawTransaction, SoeRequired},
+    {sfExpiration, SoeRequired},
+}))
+
+/** This transaction appends one signer's multi-signature to a pending
+    TransactionProposal. */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/proposal/TransactionProposalSign.h>
+#endif
+TRANSACTION(ttTRANSACTION_PROPOSAL_SIGN, 93, TransactionProposalSign,
+    Delegation::NotDelegable,
+    featureCosigner,
+    NoPriv,
+    ({
+    {sfProposalID, SoeRequired},
+    {sfSigner, SoeRequired},
+}))
+
+/** This transaction cancels a pending TransactionProposal, releasing the
+    owner's reserve. Anyone may cancel a terminal proposal. */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/proposal/TransactionProposalCancel.h>
+#endif
+TRANSACTION(ttTRANSACTION_PROPOSAL_CANCEL, 94, TransactionProposalCancel,
+    Delegation::NotDelegable,
+    featureCosigner,
+    NoPriv,
+    ({
+    {sfProposalID, SoeRequired},
+}))
+
 /** This system-generated transaction type is used to update the status of the various amendments.
 
     For details, see: https://xrpl.org/amendments.html

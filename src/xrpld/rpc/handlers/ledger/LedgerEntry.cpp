@@ -742,6 +742,35 @@ parseSponsorship(
 }
 
 static std::expected<uint256, json::Value>
+parseTransactionProposal(
+    json::Value const& params,
+    json::StaticString const fieldName,
+    [[maybe_unused]] unsigned const apiVersion)
+{
+    if (!params.isObject())
+        return parseObjectID(params, fieldName, "hex string");
+
+    auto const ownerID =
+        LedgerEntryHelpers::requiredAccountID(params, jss::owner, "malformedOwner");
+    if (!ownerID)
+        return std::unexpected(ownerID.error());
+
+    auto const targetID =
+        LedgerEntryHelpers::requiredAccountID(params, jss::account, "malformedAddress");
+    if (!targetID)
+        return std::unexpected(targetID.error());
+
+    // The proposed transaction's Sequence or TicketSequence.
+    auto const fieldName2 = params.isMember(jss::ticket_seq) ? jss::ticket_seq : jss::seq;
+    auto const seqOrTicket =
+        LedgerEntryHelpers::requiredUInt32(params, fieldName2, "malformedRequest");
+    if (!seqOrTicket)
+        return std::unexpected(seqOrTicket.error());
+
+    return keylet::txProposal(*ownerID, *targetID, *seqOrTicket).key;
+}
+
+static std::expected<uint256, json::Value>
 parseTicket(
     json::Value const& params,
     json::StaticString const fieldName,

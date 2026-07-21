@@ -216,6 +216,7 @@ TYPED_SFIELD(sfLoanID,                   UINT256,   38)
 TYPED_SFIELD(sfReferenceHolding,         UINT256,   39)
 TYPED_SFIELD(sfBlindingFactor,           UINT256,   40)
 TYPED_SFIELD(sfObjectID,                 UINT256,   41)
+TYPED_SFIELD(sfProposalID,               UINT256,   42)
 
 // number (common)
 TYPED_SFIELD(sfNumber,                   NUMBER,     1)

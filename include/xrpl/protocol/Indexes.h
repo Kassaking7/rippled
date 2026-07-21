@@ -188,6 +188,23 @@ check(uint256 const& key) noexcept
 /** @} */
 
 /**
+ * A TransactionProposal
+ *
+ * owner is the proposer; target and seqOrTicket are the proposed
+ * transaction's Account and Sequence-or-TicketSequence value.
+ */
+/** @{ */
+Keylet
+txProposal(AccountID const& owner, AccountID const& target, std::uint32_t seqOrTicket) noexcept;
+
+inline Keylet
+txProposal(uint256 const& key) noexcept
+{
+    return {ltTRANSACTION_PROPOSAL, key};
+}
+/** @} */
+
+/**
  * A DepositPreauth
  */
 /** @{ */
