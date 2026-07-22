@@ -209,20 +209,137 @@ TransactionProposalSign::doApply()
 }
 
 void
-TransactionProposalSign::visitInvariantEntry(bool, SLE::const_ref, SLE::const_ref)
+TransactionProposalSign::visitInvariantEntry(
+    bool isDelete,
+    SLE::const_ref before,
+    SLE::const_ref after)
 {
-    // No transaction-specific invariants yet (future work).
+    auto const& entry = after ? after : before;
+    if (!entry || entry->getType() != ltTRANSACTION_PROPOSAL)
+        return;
+
+    if (!isDelete && before && after)
+    {
+        ++modifiedProposals_;
+        proposalBefore_ = before;
+        proposalAfter_ = after;
+    }
+    else
+    {
+        ++otherProposalTouches_;
+    }
 }
 
 bool
 TransactionProposalSign::finalizeInvariants(
-    STTx const&,
-    TER,
+    STTx const& tx,
+    TER result,
     XRPAmount,
     ReadView const&,
-    beast::Journal const&)
+    beast::Journal const& j)
 {
-    // No transaction-specific invariants yet (future work).
+    if (!isTesSuccess(result))
+    {
+        // A failed sign claims a fee and nothing else.
+        if (modifiedProposals_ != 0 || otherProposalTouches_ != 0)
+        {
+            JLOG(j.fatal()) << "Invariant failed: failed TransactionProposalSign "
+                               "touched a proposal.";  // LCOV_EXCL_LINE
+            return false;                              // LCOV_EXCL_LINE
+        }
+        return true;
+    }
+
+    if (modifiedProposals_ != 1 || otherProposalTouches_ != 0 || !proposalBefore_ ||
+        !proposalAfter_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: TransactionProposalSign must "
+                           "modify exactly one proposal.";  // LCOV_EXCL_LINE
+        return false;                                       // LCOV_EXCL_LINE
+    }
+
+    // Everything outside the stored transaction's Signers array is immutable.
+    if ((*proposalBefore_)[sfOwner] != (*proposalAfter_)[sfOwner] ||
+        (*proposalBefore_)[sfExpiration] != (*proposalAfter_)[sfExpiration] ||
+        (*proposalBefore_)[sfOwnerNode] != (*proposalAfter_)[sfOwnerNode])
+    {
+        JLOG(j.fatal()) << "Invariant failed: TransactionProposalSign changed "
+                           "an immutable proposal field.";  // LCOV_EXCL_LINE
+        return false;                                       // LCOV_EXCL_LINE
+    }
+
+    STObject rawBefore = proposalBefore_->getFieldObject(sfRawTransaction);
+    STObject rawAfter = proposalAfter_->getFieldObject(sfRawTransaction);
+
+    STArray const beforeSigners = rawBefore.isFieldPresent(sfSigners)
+        ? rawBefore.getFieldArray(sfSigners)
+        : STArray{sfSigners};
+    STArray const afterSigners =
+        rawAfter.isFieldPresent(sfSigners) ? rawAfter.getFieldArray(sfSigners) : STArray{sfSigners};
+
+    if (rawBefore.isFieldPresent(sfSigners))
+        rawBefore.makeFieldAbsent(sfSigners);
+    if (rawAfter.isFieldPresent(sfSigners))
+        rawAfter.makeFieldAbsent(sfSigners);
+    Serializer sb, sa;
+    rawBefore.add(sb);
+    rawAfter.add(sa);
+    if (sb.peekData() != sa.peekData())
+    {
+        JLOG(j.fatal()) << "Invariant failed: TransactionProposalSign changed "
+                           "the stored transaction outside Signers.";  // LCOV_EXCL_LINE
+        return false;                                                  // LCOV_EXCL_LINE
+    }
+
+    // Exactly the submitted contribution was appended; the array stays
+    // strictly sorted (thus duplicate-free) and within the size cap.
+    if (afterSigners.size() != beforeSigners.size() + 1 ||
+        afterSigners.size() > kMaxProposalSigners)
+    {
+        JLOG(j.fatal()) << "Invariant failed: Signers array did not grow by "
+                           "exactly one entry.";  // LCOV_EXCL_LINE
+        return false;                             // LCOV_EXCL_LINE
+    }
+
+    AccountID const contributed = tx.getFieldObject(sfSigner).getAccountID(sfAccount);
+    bool foundContributed = false;
+    for (std::size_t i = 0; i < afterSigners.size(); ++i)
+    {
+        if (i > 0 &&
+            !(afterSigners[i - 1].getAccountID(sfAccount) <
+              afterSigners[i].getAccountID(sfAccount)))
+        {
+            JLOG(j.fatal()) << "Invariant failed: Signers array is not "
+                               "strictly sorted by account.";  // LCOV_EXCL_LINE
+            return false;                                      // LCOV_EXCL_LINE
+        }
+        if (afterSigners[i].getAccountID(sfAccount) == contributed)
+            foundContributed = true;
+    }
+    if (!foundContributed)
+    {
+        JLOG(j.fatal()) << "Invariant failed: submitted contribution is not "
+                           "in the Signers array.";  // LCOV_EXCL_LINE
+        return false;                                // LCOV_EXCL_LINE
+    }
+
+    // Every previously collected contribution survives byte-for-byte.
+    for (auto const& b : beforeSigners)
+    {
+        bool const survives = std::ranges::any_of(afterSigners, [&b](STObject const& a) {
+            Serializer s1, s2;
+            b.add(s1);
+            a.add(s2);
+            return s1.peekData() == s2.peekData();
+        });
+        if (!survives)
+        {
+            JLOG(j.fatal()) << "Invariant failed: a collected signature was "
+                               "dropped or altered.";  // LCOV_EXCL_LINE
+            return false;                              // LCOV_EXCL_LINE
+        }
+    }
+
     return true;
 }
 

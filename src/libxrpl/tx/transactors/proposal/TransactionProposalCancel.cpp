@@ -83,20 +83,48 @@ TransactionProposalCancel::doApply()
 }
 
 void
-TransactionProposalCancel::visitInvariantEntry(bool, SLE::const_ref, SLE::const_ref)
+TransactionProposalCancel::visitInvariantEntry(
+    bool isDelete,
+    SLE::const_ref before,
+    SLE::const_ref after)
 {
-    // No transaction-specific invariants yet (future work).
+    auto const& entry = after ? after : before;
+    if (!entry || entry->getType() != ltTRANSACTION_PROPOSAL)
+        return;
+
+    if (isDelete)
+        ++deletedProposals_;
+    else
+        ++otherProposalTouches_;
 }
 
 bool
 TransactionProposalCancel::finalizeInvariants(
     STTx const&,
-    TER,
+    TER result,
     XRPAmount,
     ReadView const&,
-    beast::Journal const&)
+    beast::Journal const& j)
 {
-    // No transaction-specific invariants yet (future work).
+    if (!isTesSuccess(result))
+    {
+        // A failed cancel claims a fee and nothing else.
+        if (deletedProposals_ != 0 || otherProposalTouches_ != 0)
+        {
+            JLOG(j.fatal()) << "Invariant failed: failed TransactionProposalCancel "
+                               "touched a proposal.";  // LCOV_EXCL_LINE
+            return false;                              // LCOV_EXCL_LINE
+        }
+        return true;
+    }
+
+    if (deletedProposals_ != 1 || otherProposalTouches_ != 0)
+    {
+        JLOG(j.fatal()) << "Invariant failed: TransactionProposalCancel must "
+                           "delete exactly one proposal.";  // LCOV_EXCL_LINE
+        return false;                                       // LCOV_EXCL_LINE
+    }
+
     return true;
 }
 

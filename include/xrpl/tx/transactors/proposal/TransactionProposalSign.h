@@ -18,6 +18,7 @@ public:
 
     explicit TransactionProposalSign(ApplyContext& ctx) : Transactor(ctx)
     {
+        enforceTransactionInvariants_ = true;
     }
 
     static NotTEC
@@ -39,6 +40,15 @@ public:
         XRPAmount fee,
         ReadView const& view,
         beast::Journal const& j) override;
+
+private:
+    // Invariant state: the before/after images of the proposal this
+    // transaction modified, and any proposal entries it touched in another
+    // way (there must be none).
+    std::shared_ptr<SLE const> proposalBefore_;
+    std::shared_ptr<SLE const> proposalAfter_;
+    std::size_t modifiedProposals_ = 0;
+    std::size_t otherProposalTouches_ = 0;
 };
 
 }  // namespace xrpl

@@ -3,10 +3,13 @@
 #include <test/jtx/TestHelpers.h>
 #include <test/jtx/amount.h>
 #include <test/jtx/balance.h>
+#include <test/jtx/delegate.h>
 #include <test/jtx/fee.h>
+#include <test/jtx/flags.h>
 #include <test/jtx/multisign.h>
 #include <test/jtx/owners.h>
 #include <test/jtx/pay.h>
+#include <test/jtx/regkey.h>
 #include <test/jtx/seq.h>
 #include <test/jtx/sig.h>
 #include <test/jtx/ter.h>
@@ -74,19 +77,29 @@ class Cosigner_test : public beast::unit_test::Suite
 
     // A standard multi-sign contribution over the proposed transaction,
     // computed exactly as sign_for would: multisign signing data over the
-    // unsigned payload, suffixed with the signer's account.
+    // unsigned payload, suffixed with the signer's account. `keys` supplies
+    // the signing key pair, which need not be the signer's master key.
     static json::Value
-    contribution(json::Value const& inner, test::jtx::Account const& signer)
+    contribution(
+        json::Value const& inner,
+        test::jtx::Account const& signer,
+        test::jtx::Account const& keys)
     {
         STObject const st = test::jtx::parse(inner);
         Serializer const data{buildMultiSigningData(st, signer.id())};
-        auto const sig = sign(signer.pk(), signer.sk(), data.slice());
+        auto const sig = sign(keys.pk(), keys.sk(), data.slice());
 
         json::Value sj;
         sj[jss::Account] = signer.human();
-        sj[jss::SigningPubKey] = strHex(signer.pk().slice());
+        sj[jss::SigningPubKey] = strHex(keys.pk().slice());
         sj[sfTxnSignature.getJsonName()] = strHex(Slice{sig.data(), sig.size()});
         return sj;
+    }
+
+    static json::Value
+    contribution(json::Value const& inner, test::jtx::Account const& signer)
+    {
+        return contribution(inner, signer, signer);
     }
 
     static json::Value
@@ -520,6 +533,132 @@ class Cosigner_test : public beast::unit_test::Suite
         env(proposalCancel(alice, proposalKeylet.key), Ter(tecNO_ENTRY));
     }
 
+    void
+    testDelegateProposal()
+    {
+        testcase("delegate-authorized proposal");
+        using namespace test::jtx;
+        using namespace std::chrono_literals;
+
+        Env env{*this};
+        Account const alice{"alice"};
+        Account const corp{"corp"};
+        Account const del{"del"};
+        Account const dave{"dave"};
+        Account const bob{"bob"};
+        Account const carol{"carol"};
+        Account const edgar{"edgar"};
+        env.fund(XRP(1000), alice, corp, del, dave, bob, carol, edgar);
+        // The delegate's SignerList authorizes the collected signatures; the
+        // target's own list must play no part.
+        env(signers(del, 2, {{bob, 1}, {carol, 1}}));
+        env(signers(corp, 1, {{edgar, 1}}));
+        env(delegate::set(corp, del, {"Payment"}));
+        env.close();
+
+        // A transaction may not delegate to its own account; the inner
+        // preflight at create time rejects the stored form outright.
+        {
+            auto bad = proposedPayment(corp, dave, XRP(100), env.seq(corp));
+            bad[sfDelegate.getJsonName()] = corp.human();
+            env(proposalCreate(alice, bad, expAfter(env, 600s)), Ter(temMALFORMED));
+        }
+
+        std::uint32_t const innerSeq = env.seq(corp);
+        json::Value inner = proposedPayment(corp, dave, XRP(100), innerSeq);
+        inner[sfDelegate.getJsonName()] = del.human();
+        env(proposalCreate(alice, inner, expAfter(env, 600s)));
+        env.close();
+
+        auto const proposalKeylet = keylet::txProposal(alice.id(), corp.id(), innerSeq);
+        BEAST_EXPECT(env.le(proposalKeylet));
+
+        // Membership runs against the delegate's SignerList, not the
+        // target's: edgar is a signer for corp but not for del.
+        env(proposalSign(edgar, proposalKeylet.key, contribution(inner, edgar)),
+            Ter(tecNO_PERMISSION));
+
+        env(proposalSign(bob, proposalKeylet.key, contribution(inner, bob)));
+        env(proposalSign(carol, proposalKeylet.key, contribution(inner, carol)));
+        env.close();
+
+        auto const daveBefore = env.balance(dave);
+        auto const corpBefore = env.balance(corp);
+        auto const delBefore = env.balance(del);
+        json::Value const completed = env.le(proposalKeylet)
+                                          ->getFieldObject(sfRawTransaction)
+                                          .getJson(JsonOptions::Values::None);
+        env(completed, Fee(kNone), Seq(kNone), Sig(kNone));
+        env.close();
+
+        BEAST_EXPECT(env.balance(dave) == daveBefore + XRP(100));
+        BEAST_EXPECT(env.seq(corp) == innerSeq + 1);
+        // The target pays the amount; the delegate pays the fee.
+        BEAST_EXPECT(env.balance(corp) == corpBefore - XRP(100));
+        BEAST_EXPECT(env.balance(del) == delBefore - drops(100));
+
+        env(proposalCancel(alice, proposalKeylet.key));
+    }
+
+    void
+    testSignKeyBinding()
+    {
+        testcase("sign key binding: regular key and disabled master");
+        using namespace test::jtx;
+        using namespace std::chrono_literals;
+
+        Env env{*this};
+        Account const alice{"alice"};
+        Account const corp{"corp"};
+        Account const dave{"dave"};
+        Account const bob{"bob"};
+        Account const carol{"carol"};
+        Account const bobr{"bobr"};
+        Account const mallory{"mallory"};
+        env.fund(XRP(1000), alice, corp, dave, bob, carol);
+        env(signers(corp, 2, {{bob, 1}, {carol, 1}}));
+        env(regkey(bob, bobr));
+        env(fset(bob, asfDisableMaster), Sig(bob));
+        env.close();
+
+        std::uint32_t const innerSeq = env.seq(corp);
+        auto const inner = proposedPayment(corp, dave, XRP(100), innerSeq);
+        env(proposalCreate(alice, inner, expAfter(env, 600s)));
+        env.close();
+
+        auto const proposalKeylet = keylet::txProposal(alice.id(), corp.id(), innerSeq);
+        auto const id = proposalKeylet.key;
+
+        // Bob's master key is disabled: a master-key contribution is
+        // rejected even though the outer submission (via regular key) is
+        // perfectly valid.
+        env(proposalSign(bob, id, contribution(inner, bob, bob)),
+            Sig(bobr),
+            Ter(tefMASTER_DISABLED));
+
+        // A key unrelated to the signer never binds, with or without a
+        // regular key on the account.
+        env(proposalSign(bob, id, contribution(inner, bob, mallory)),
+            Sig(bobr),
+            Ter(tefBAD_SIGNATURE));
+        env(proposalSign(carol, id, contribution(inner, carol, mallory)), Ter(tefBAD_SIGNATURE));
+
+        // Bob contributes through his regular key; carol through her master.
+        env(proposalSign(bob, id, contribution(inner, bob, bobr)), Sig(bobr));
+        env(proposalSign(carol, id, contribution(inner, carol)));
+        env.close();
+
+        // The mixed-key collection satisfies the ordinary submission path.
+        auto const daveBefore = env.balance(dave);
+        json::Value const completed = env.le(proposalKeylet)
+                                          ->getFieldObject(sfRawTransaction)
+                                          .getJson(JsonOptions::Values::None);
+        env(completed, Fee(kNone), Seq(kNone), Sig(kNone));
+        env.close();
+        BEAST_EXPECT(env.balance(dave) == daveBefore + XRP(100));
+        BEAST_EXPECT(env.seq(corp) == innerSeq + 1);
+    }
+
 public:
     void
     run() override
@@ -532,6 +671,8 @@ public:
         testTicketProposal();
         testExpiration();
         testOwnerCancelLive();
+        testDelegateProposal();
+        testSignKeyBinding();
     }
 };
 

@@ -1575,15 +1575,21 @@ Transactor::checkTransactionInvariants(TER result, XRPAmount fee)
 Transactor::checkInvariants(TER result, XRPAmount fee)
 {
     /*
-     * DISABLED for 3.2.0 — Must be re-introduced for 3.3.0
-     *
-     * Transaction invariants are disabled due to a performance regression:
-     * the two-pass design (transaction-specific invariants + protocol invariants)
-     * iterates over modified ledger entries twice per transaction.
-     *
-     * Until resolved, only protocol invariants are checked (delegated to ctx_).
-     * This is safe because all transaction invariants in 3.2.0 are  no-ops.
+     * The transaction-invariant pass remains opt-in (it iterates the
+     * modified ledger entries a second time, a measured regression when run
+     * for every transaction in 3.2.0). Transactors that define real
+     * invariants set enforceTransactionInvariants_; for everyone else only
+     * protocol invariants run, which is safe because their transaction
+     * invariants are no-ops. Re-introducing the pass unconditionally
+     * requires resolving the two-pass cost first.
      */
+    if (enforceTransactionInvariants_)
+    {
+        result = checkTransactionInvariants(result, fee);
+        if (result == tecINVARIANT_FAILED)
+            return result;
+    }
+
     return ctx_.checkInvariants(result, fee);
 }
 

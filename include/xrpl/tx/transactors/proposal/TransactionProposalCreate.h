@@ -18,6 +18,7 @@ public:
 
     explicit TransactionProposalCreate(ApplyContext& ctx) : Transactor(ctx)
     {
+        enforceTransactionInvariants_ = true;
     }
 
     static NotTEC
@@ -39,6 +40,13 @@ public:
         XRPAmount fee,
         ReadView const& view,
         beast::Journal const& j) override;
+
+private:
+    // Invariant state: the proposal entry this transaction created, and any
+    // proposal entries it touched in another way (there must be none).
+    std::shared_ptr<SLE const> createdProposal_;
+    std::size_t createdProposals_ = 0;
+    std::size_t otherProposalTouches_ = 0;
 };
 
 }  // namespace xrpl

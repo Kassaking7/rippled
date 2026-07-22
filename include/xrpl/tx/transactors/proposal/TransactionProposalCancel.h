@@ -18,6 +18,7 @@ public:
 
     explicit TransactionProposalCancel(ApplyContext& ctx) : Transactor(ctx)
     {
+        enforceTransactionInvariants_ = true;
     }
 
     static NotTEC
@@ -39,6 +40,12 @@ public:
         XRPAmount fee,
         ReadView const& view,
         beast::Journal const& j) override;
+
+private:
+    // Invariant state: proposal entries deleted by this transaction, and any
+    // touched in another way (there must be none).
+    std::size_t deletedProposals_ = 0;
+    std::size_t otherProposalTouches_ = 0;
 };
 
 }  // namespace xrpl

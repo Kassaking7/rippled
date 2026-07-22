@@ -157,6 +157,12 @@ protected:
     AccountID const accountID_;
     XRPAmount preFeeBalance_{};  // Balance before fees.
 
+    // Opt-in for the transaction-specific invariant pass
+    // (visitInvariantEntry + finalizeInvariants). The pass iterates the
+    // modified ledger entries a second time, so it stays off unless a
+    // transactor defines real invariants and sets this in its constructor.
+    bool enforceTransactionInvariants_ = false;
+
 public:
     virtual ~Transactor() = default;
     Transactor(Transactor const&) = delete;
@@ -187,8 +193,10 @@ public:
      * Check all invariants for the current transaction.
      *
      * Runs transaction-specific invariants first (visitInvariantEntry +
-     * finalizeInvariants), then protocol-level invariants.  Both layers
-     * always run; the worst failure code is returned.
+     * finalizeInvariants) for transactors that opted in via
+     * enforceTransactionInvariants_, then protocol-level invariants. A
+     * transaction-invariant failure short-circuits: the caller resets to a
+     * fee-claim and re-runs the protocol layer.
      *
      * @param result  the tentative TER from transaction processing.
      * @param fee     the fee consumed by the transaction.
