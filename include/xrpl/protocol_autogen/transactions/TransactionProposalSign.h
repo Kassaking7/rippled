@@ -57,6 +57,17 @@ public:
     {
         return this->tx_->at(sfProposalID);
     }
+
+    /**
+     * @brief Get sfSigningFor (SoeRequired)
+     * @return The field value.
+     */
+    [[nodiscard]]
+    SF_ACCOUNT::type::value_type
+    getSigningFor() const
+    {
+        return this->tx_->at(sfSigningFor);
+    }
     /**
      * @brief Get sfSigner (SoeRequired)
      * @note This is an untyped field.
@@ -84,17 +95,19 @@ public:
      * @brief Construct a new TransactionProposalSignBuilder with required fields.
      * @param account The account initiating the transaction.
      * @param proposalID The sfProposalID field value.
+     * @param signingFor The sfSigningFor field value.
      * @param signer The sfSigner field value.
      * @param sequence Optional sequence number for the transaction.
      * @param fee Optional fee for the transaction.
      */
     TransactionProposalSignBuilder(SF_ACCOUNT::type::value_type account,
-                     std::decay_t<typename SF_UINT256::type::value_type> const& proposalID,                     STObject const& signer,                    std::optional<SF_UINT32::type::value_type> sequence = std::nullopt,
+                     std::decay_t<typename SF_UINT256::type::value_type> const& proposalID,                     std::decay_t<typename SF_ACCOUNT::type::value_type> const& signingFor,                     STObject const& signer,                    std::optional<SF_UINT32::type::value_type> sequence = std::nullopt,
                     std::optional<SF_AMOUNT::type::value_type> fee = std::nullopt
 )
         : TransactionBuilderBase<TransactionProposalSignBuilder>(ttTRANSACTION_PROPOSAL_SIGN, account, sequence, fee)
     {
         setProposalID(proposalID);
+        setSigningFor(signingFor);
         setSigner(signer);
     }
 
@@ -124,6 +137,17 @@ public:
     setProposalID(std::decay_t<typename SF_UINT256::type::value_type> const& value)
     {
         object_[sfProposalID] = value;
+        return *this;
+    }
+
+    /**
+     * @brief Set sfSigningFor (SoeRequired)
+     * @return Reference to this builder for method chaining.
+     */
+    TransactionProposalSignBuilder&
+    setSigningFor(std::decay_t<typename SF_ACCOUNT::type::value_type> const& value)
+    {
+        object_[sfSigningFor] = value;
         return *this;
     }
 

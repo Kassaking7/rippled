@@ -30,11 +30,13 @@ TEST(TransactionsTransactionProposalSignTests, BuilderSettersRoundTrip)
 
     // Transaction-specific field values
     auto const proposalIDValue = canonical_UINT256();
+    auto const signingForValue = canonical_ACCOUNT();
     auto const signerValue = canonical_OBJECT();
 
     TransactionProposalSignBuilder builder{
         accountValue,
         proposalIDValue,
+        signingForValue,
         signerValue,
         sequenceValue,
         feeValue
@@ -64,6 +66,12 @@ TEST(TransactionsTransactionProposalSignTests, BuilderSettersRoundTrip)
     }
 
     {
+        auto const& expected = signingForValue;
+        auto const actual = tx.getSigningFor();
+        expectEqualField(expected, actual, "sfSigningFor");
+    }
+
+    {
         auto const& expected = signerValue;
         auto const actual = tx.getSigner();
         expectEqualField(expected, actual, "sfSigner");
@@ -87,12 +95,14 @@ TEST(TransactionsTransactionProposalSignTests, BuilderFromStTxRoundTrip)
 
     // Transaction-specific field values
     auto const proposalIDValue = canonical_UINT256();
+    auto const signingForValue = canonical_ACCOUNT();
     auto const signerValue = canonical_OBJECT();
 
     // Build an initial transaction
     TransactionProposalSignBuilder initialBuilder{
         accountValue,
         proposalIDValue,
+        signingForValue,
         signerValue,
         sequenceValue,
         feeValue
@@ -119,6 +129,12 @@ TEST(TransactionsTransactionProposalSignTests, BuilderFromStTxRoundTrip)
         auto const& expected = proposalIDValue;
         auto const actual = rebuiltTx.getProposalID();
         expectEqualField(expected, actual, "sfProposalID");
+    }
+
+    {
+        auto const& expected = signingForValue;
+        auto const actual = rebuiltTx.getSigningFor();
+        expectEqualField(expected, actual, "sfSigningFor");
     }
 
     {

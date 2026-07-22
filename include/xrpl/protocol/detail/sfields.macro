@@ -358,6 +358,7 @@ TYPED_SFIELD(sfHighSponsor,              ACCOUNT,   28)
 TYPED_SFIELD(sfLowSponsor,               ACCOUNT,   29)
 TYPED_SFIELD(sfCounterpartySponsor,      ACCOUNT,   30)
 TYPED_SFIELD(sfSponsee,                  ACCOUNT,   31)
+TYPED_SFIELD(sfSigningFor,               ACCOUNT,   32)
 
 // vector of 256-bit
 TYPED_SFIELD(sfIndexes,                  VECTOR256,  1, SField::kSmdNever)

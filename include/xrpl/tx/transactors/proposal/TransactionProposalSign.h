@@ -11,6 +11,22 @@
 
 namespace xrpl {
 
+/**
+ * Appends one signature toward a pending TransactionProposal.
+ *
+ * A contribution is a uniform (SigningFor, SigningPubKey, TxnSignature)
+ * triple: SigningFor names the account being authorized, and the ledger
+ * derives the rest. The relationship between the submitting Account and
+ * SigningFor decides the mode: Account == SigningFor is a single signature
+ * that fills the stored transaction's top-level slot; Account != SigningFor
+ * is a multi-signature share appended to the relevant Signers array.
+ *
+ * Scope: this transactor recognizes the proposed transaction's main
+ * authorization slot only — its Account, or its Delegate for a delegated
+ * transaction. The Counterparty (XLS-66), Sponsor (XLS-68), and Batch
+ * participant (XLS-56) slots of the full SigningFor model are deferred; a
+ * SigningFor naming any other account fails with tecNO_PERMISSION.
+ */
 class TransactionProposalSign : public Transactor
 {
 public:

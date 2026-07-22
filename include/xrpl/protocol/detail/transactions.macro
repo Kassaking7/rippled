@@ -1219,6 +1219,7 @@ TRANSACTION(ttTRANSACTION_PROPOSAL_SIGN, 93, TransactionProposalSign,
     NoPriv,
     ({
     {sfProposalID, SoeRequired},
+    {sfSigningFor, SoeRequired},
     {sfSigner, SoeRequired},
 }))
 

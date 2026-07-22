@@ -22,6 +22,7 @@
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/protocol/Feature.h>
+#include <xrpl/protocol/HashPrefix.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/SecretKey.h>
@@ -102,16 +103,48 @@ class Cosigner_test : public beast::unit_test::Suite
         return contribution(inner, signer, signer);
     }
 
+    // A single signature over the proposed transaction: standard transaction
+    // signing data with SigningPubKey populated to the signer's key, exactly
+    // as a directly single-signed submission would compute it. `keys` need
+    // not be the signer's master key.
+    static json::Value
+    singleContribution(
+        json::Value const& inner,
+        test::jtx::Account const& signer,
+        test::jtx::Account const& keys)
+    {
+        STObject st = test::jtx::parse(inner);
+        st.setFieldVL(sfSigningPubKey, keys.pk().slice());
+        Serializer data;
+        data.add32(HashPrefix::TxSign);
+        st.addWithoutSigningFields(data);
+        auto const sig = sign(keys.pk(), keys.sk(), data.slice());
+
+        json::Value sj;
+        sj[jss::Account] = signer.human();
+        sj[jss::SigningPubKey] = strHex(keys.pk().slice());
+        sj[sfTxnSignature.getJsonName()] = strHex(Slice{sig.data(), sig.size()});
+        return sj;
+    }
+
+    static json::Value
+    singleContribution(json::Value const& inner, test::jtx::Account const& signer)
+    {
+        return singleContribution(inner, signer, signer);
+    }
+
     static json::Value
     proposalSign(
         test::jtx::Account const& submitter,
         uint256 const& proposalID,
+        test::jtx::Account const& signingFor,
         json::Value const& signerContribution)
     {
         json::Value jv;
         jv[jss::TransactionType] = "TransactionProposalSign";
         jv[jss::Account] = submitter.human();
         jv[sfProposalID.getJsonName()] = to_string(proposalID);
+        jv[sfSigningFor.getJsonName()] = signingFor.human();
         jv[sfSigner.getJsonName()] = signerContribution;
         return jv;
     }
@@ -144,7 +177,7 @@ class Cosigner_test : public beast::unit_test::Suite
         env(proposalCreate(alice, inner, expAfter(env, 600s)), Ter(temDISABLED));
 
         auto const id = keylet::txProposal(alice.id(), corp.id(), env.seq(corp)).key;
-        env(proposalSign(alice, id, contribution(inner, alice)), Ter(temDISABLED));
+        env(proposalSign(alice, id, corp, contribution(inner, alice)), Ter(temDISABLED));
         env(proposalCancel(alice, id), Ter(temDISABLED));
     }
 
@@ -323,22 +356,22 @@ class Cosigner_test : public beast::unit_test::Suite
         auto const id = proposalKeylet.key;
 
         // Unknown proposal.
-        env(proposalSign(bob, uint256{7}, contribution(inner, bob)), Ter(tecNO_ENTRY));
+        env(proposalSign(bob, uint256{7}, corp, contribution(inner, bob)), Ter(tecNO_ENTRY));
 
         // A non-signer cannot contribute.
-        env(proposalSign(dave, id, contribution(inner, dave)), Ter(tecNO_PERMISSION));
+        env(proposalSign(dave, id, corp, contribution(inner, dave)), Ter(tecNO_PERMISSION));
 
         // The submitter must be the contributing signer.
-        env(proposalSign(bob, id, contribution(inner, carol)), Ter(temMALFORMED));
+        env(proposalSign(bob, id, corp, contribution(inner, carol)), Ter(temMALFORMED));
 
         // A signature over different bytes does not verify.
         {
             auto const other = proposedPayment(corp, dave, XRP(999), innerSeq);
-            env(proposalSign(bob, id, contribution(other, bob)), Ter(tefBAD_SIGNATURE));
+            env(proposalSign(bob, id, corp, contribution(other, bob)), Ter(tefBAD_SIGNATURE));
         }
 
         // Bob's valid contribution is recorded.
-        env(proposalSign(bob, id, contribution(inner, bob)));
+        env(proposalSign(bob, id, corp, contribution(inner, bob)));
         env.close();
         {
             auto const raw = env.le(proposalKeylet)->getFieldObject(sfRawTransaction);
@@ -346,10 +379,10 @@ class Cosigner_test : public beast::unit_test::Suite
         }
 
         // Signing twice is rejected.
-        env(proposalSign(bob, id, contribution(inner, bob)), Ter(tecDUPLICATE));
+        env(proposalSign(bob, id, corp, contribution(inner, bob)), Ter(tecDUPLICATE));
 
         // Carol completes the quorum; the array is sorted by account.
-        env(proposalSign(carol, id, contribution(inner, carol)));
+        env(proposalSign(carol, id, corp, contribution(inner, carol)));
         env.close();
         {
             auto const raw = env.le(proposalKeylet)->getFieldObject(sfRawTransaction);
@@ -383,8 +416,8 @@ class Cosigner_test : public beast::unit_test::Suite
         env.close();
 
         auto const proposalKeylet = keylet::txProposal(alice.id(), corp.id(), innerSeq);
-        env(proposalSign(bob, proposalKeylet.key, contribution(inner, bob)));
-        env(proposalSign(carol, proposalKeylet.key, contribution(inner, carol)));
+        env(proposalSign(bob, proposalKeylet.key, corp, contribution(inner, bob)));
+        env(proposalSign(carol, proposalKeylet.key, corp, contribution(inner, carol)));
         env.close();
 
         // Quorum reached: the stored transaction is fully signed. Copy it
@@ -442,8 +475,8 @@ class Cosigner_test : public beast::unit_test::Suite
         auto const proposalKeylet = keylet::txProposal(alice.id(), corp.id(), ticketSeq);
         BEAST_EXPECT(env.le(proposalKeylet));
 
-        env(proposalSign(bob, proposalKeylet.key, contribution(inner, bob)));
-        env(proposalSign(carol, proposalKeylet.key, contribution(inner, carol)));
+        env(proposalSign(bob, proposalKeylet.key, corp, contribution(inner, bob)));
+        env(proposalSign(carol, proposalKeylet.key, corp, contribution(inner, carol)));
         env.close();
 
         auto const daveBefore = env.balance(dave);
@@ -492,7 +525,7 @@ class Cosigner_test : public beast::unit_test::Suite
 
         // A terminal proposal no longer accepts signatures, and is not
         // deleted by the failed attempt (no tec-with-cleanup in v1).
-        env(proposalSign(bob, proposalKeylet.key, contribution(inner, bob)), Ter(tecEXPIRED));
+        env(proposalSign(bob, proposalKeylet.key, corp, contribution(inner, bob)), Ter(tecEXPIRED));
         env.close();
         BEAST_EXPECT(env.le(proposalKeylet));
 
@@ -575,11 +608,11 @@ class Cosigner_test : public beast::unit_test::Suite
 
         // Membership runs against the delegate's SignerList, not the
         // target's: edgar is a signer for corp but not for del.
-        env(proposalSign(edgar, proposalKeylet.key, contribution(inner, edgar)),
+        env(proposalSign(edgar, proposalKeylet.key, del, contribution(inner, edgar)),
             Ter(tecNO_PERMISSION));
 
-        env(proposalSign(bob, proposalKeylet.key, contribution(inner, bob)));
-        env(proposalSign(carol, proposalKeylet.key, contribution(inner, carol)));
+        env(proposalSign(bob, proposalKeylet.key, del, contribution(inner, bob)));
+        env(proposalSign(carol, proposalKeylet.key, del, contribution(inner, carol)));
         env.close();
 
         auto const daveBefore = env.balance(dave);
@@ -632,20 +665,21 @@ class Cosigner_test : public beast::unit_test::Suite
         // Bob's master key is disabled: a master-key contribution is
         // rejected even though the outer submission (via regular key) is
         // perfectly valid.
-        env(proposalSign(bob, id, contribution(inner, bob, bob)),
+        env(proposalSign(bob, id, corp, contribution(inner, bob, bob)),
             Sig(bobr),
             Ter(tefMASTER_DISABLED));
 
         // A key unrelated to the signer never binds, with or without a
         // regular key on the account.
-        env(proposalSign(bob, id, contribution(inner, bob, mallory)),
+        env(proposalSign(bob, id, corp, contribution(inner, bob, mallory)),
             Sig(bobr),
             Ter(tefBAD_SIGNATURE));
-        env(proposalSign(carol, id, contribution(inner, carol, mallory)), Ter(tefBAD_SIGNATURE));
+        env(proposalSign(carol, id, corp, contribution(inner, carol, mallory)),
+            Ter(tefBAD_SIGNATURE));
 
         // Bob contributes through his regular key; carol through her master.
-        env(proposalSign(bob, id, contribution(inner, bob, bobr)), Sig(bobr));
-        env(proposalSign(carol, id, contribution(inner, carol)));
+        env(proposalSign(bob, id, corp, contribution(inner, bob, bobr)), Sig(bobr));
+        env(proposalSign(carol, id, corp, contribution(inner, carol)));
         env.close();
 
         // The mixed-key collection satisfies the ordinary submission path.
