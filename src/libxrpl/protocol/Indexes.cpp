@@ -105,6 +105,8 @@ enum class LedgerNameSpace : std::uint16_t {
     Loan = 'L',
     Sponsorship = '>',
     TransactionProposal = 'y',
+    TokenPreauth = 'w',
+    TokenBlock = 'W',
 
     // No longer used or supported. Left here to reserve the space to avoid accidental reuse.
     Contract [[deprecated]] = 'c',
@@ -367,6 +369,19 @@ txProposal(AccountID const& target, std::uint32_t ticketSequence) noexcept
     return {
         ltTRANSACTION_PROPOSAL,
         indexHash(LedgerNameSpace::TransactionProposal, target, ticketSequence)};
+}
+
+Keylet
+tokenPreauth(AccountID const& holder, MPTID const& issuanceID) noexcept
+{
+    // The issuer is not hashed separately: the issuance ID already encodes it.
+    return {ltTOKEN_PREAUTH, indexHash(LedgerNameSpace::TokenPreauth, holder, issuanceID)};
+}
+
+Keylet
+tokenBlock(AccountID const& holder, MPTID const& issuanceID) noexcept
+{
+    return {ltTOKEN_BLOCK, indexHash(LedgerNameSpace::TokenBlock, holder, issuanceID)};
 }
 
 Keylet
