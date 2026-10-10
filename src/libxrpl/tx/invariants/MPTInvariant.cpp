@@ -68,6 +68,47 @@ subtractMPTAmountDelta(std::int64_t delta, std::uint64_t amount)
 }  // namespace
 
 void
+ValidTokenPreauth::visitEntry(bool isDelete, SLE::ConstRef, SLE::ConstRef after)
+{
+    if (isDelete || !after)
+        return;
+
+    if (after->getType() == ltTOKEN_PREAUTH || after->getType() == ltTOKEN_BLOCK)
+        changedEntries_.push_back(after);
+}
+
+bool
+ValidTokenPreauth::finalize(
+    STTx const&,
+    TER const,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j) const
+{
+    for (auto const& sle : changedEntries_)
+    {
+        auto const issuanceID = sle->at(sfMPTokenIssuanceID);
+        auto const holder = sle->at(sfHolder);
+        auto const issuer = MPTIssue{issuanceID}.getIssuer();
+        if (sle->at(sfAccount) != issuer || holder == issuer)
+        {
+            JLOG(j.fatal()) << "Invariant failed: TokenPreauth/TokenBlock not owned by the "
+                               "issuer, or names the issuer as holder";
+            return false;
+        }
+
+        if (view.exists(keylet::tokenPreauth(holder, issuanceID)) &&
+            view.exists(keylet::tokenBlock(holder, issuanceID)))
+        {
+            JLOG(j.fatal()) << "Invariant failed: holder is both pre-authorized and blocked";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void
 ValidMPTIssuance::visitEntry(bool isDelete, SLE::ConstRef before, SLE::ConstRef after)
 {
     // The sfReferenceHolding tracking and the deleted-holding capture are

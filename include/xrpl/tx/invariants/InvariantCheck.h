@@ -450,6 +450,7 @@ using InvariantChecks = std::tuple<
     NFTokenCountTracking,
     ValidClawback,
     ValidMPTIssuance,
+    ValidTokenPreauth,
     ValidPermissionedDomain,
     ValidPermissionedDEX,
     ValidBookDirectory,
