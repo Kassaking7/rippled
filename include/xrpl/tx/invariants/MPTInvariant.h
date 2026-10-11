@@ -92,6 +92,36 @@ public:
 };
 
 /**
+ * @brief Verify TokenPreauth and TokenBlock entries and the block they impose.
+ *
+ * - No transaction creates an MPToken for a blocked holder, except
+ *   AMMClawback recreating one to seize from, which creates it locked.
+ * - No transaction leaves a blocked holder with an authorized MPToken.
+ * - Every TokenPreauth or TokenBlock entry is owned by the issuer of its
+ *   MPTokenIssuanceID and does not name that issuer as the holder.
+ * - A holder is never both pre-authorized and blocked for the same issuance.
+ * - A new TokenBlock leaves the holder's MPToken, if any, unauthorized.
+ */
+class ValidTokenPreauth
+{
+    std::vector<std::shared_ptr<SLE const>> createdMPTokens_;
+    std::vector<std::shared_ptr<SLE const>> touchedMPTokens_;
+    std::vector<std::shared_ptr<SLE const>> changedEntries_;
+
+public:
+    void
+    visitEntry(bool isDelete, SLE::ConstRef before, SLE::ConstRef after);
+
+    [[nodiscard]] bool
+    finalize(
+        STTx const& tx,
+        TER const result,
+        XRPAmount const fee,
+        ReadView const& view,
+        beast::Journal const& j) const;
+};
+
+/**
  * @brief Verify public MPT amount and outstanding amount accounting.
  *
  * Checks that OutstandingAmount does not exceed MaximumAmount and that

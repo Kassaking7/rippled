@@ -68,6 +68,85 @@ subtractMPTAmountDelta(std::int64_t delta, std::uint64_t amount)
 }  // namespace
 
 void
+ValidTokenPreauth::visitEntry(bool isDelete, SLE::ConstRef before, SLE::ConstRef after)
+{
+    if (isDelete || !after)
+        return;
+
+    if (after->getType() == ltMPTOKEN)
+    {
+        if (!before)
+            createdMPTokens_.push_back(after);
+        touchedMPTokens_.push_back(after);
+    }
+    else if (after->getType() == ltTOKEN_PREAUTH || after->getType() == ltTOKEN_BLOCK)
+    {
+        changedEntries_.push_back(after);
+    }
+}
+
+bool
+ValidTokenPreauth::finalize(
+    STTx const&,
+    TER const,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j) const
+{
+    for (auto const& sleMpt : createdMPTokens_)
+    {
+        if (!sleMpt->isFlag(lsfMPTLocked) &&
+            isMPTBlocked(view, sleMpt->at(sfMPTokenIssuanceID), sleMpt->at(sfAccount)))
+        {
+            JLOG(j.fatal()) << "Invariant failed: unlocked MPToken created for a blocked holder";
+            return false;
+        }
+    }
+
+    for (auto const& sleMpt : touchedMPTokens_)
+    {
+        if (sleMpt->isFlag(lsfMPTAuthorized) &&
+            isMPTBlocked(view, sleMpt->at(sfMPTokenIssuanceID), sleMpt->at(sfAccount)))
+        {
+            JLOG(j.fatal()) << "Invariant failed: blocked holder's MPToken is authorized";
+            return false;
+        }
+    }
+
+    return std::ranges::all_of(changedEntries_, [&](auto const& sle) {
+        auto const issuanceID = sle->at(sfMPTokenIssuanceID);
+        auto const holder = sle->at(sfHolder);
+        auto const issuer = MPTIssue{issuanceID}.getIssuer();
+        if (sle->at(sfAccount) != issuer || holder == issuer)
+        {
+            JLOG(j.fatal()) << "Invariant failed: TokenPreauth/TokenBlock not owned by the "
+                               "issuer, or names the issuer as holder";
+            return false;
+        }
+
+        if (view.exists(keylet::tokenPreauth(holder, issuanceID)) &&
+            view.exists(keylet::tokenBlock(holder, issuanceID)))
+        {
+            JLOG(j.fatal()) << "Invariant failed: holder is both pre-authorized and blocked";
+            return false;
+        }
+
+        if (sle->getType() == ltTOKEN_BLOCK)
+        {
+            auto const sleMpt = view.read(keylet::mptoken(issuanceID, holder));
+            if (sleMpt && sleMpt->isFlag(lsfMPTAuthorized))
+            {
+                JLOG(j.fatal()) << "Invariant failed: blocked holder's MPToken is still "
+                                   "authorized";
+                return false;
+            }
+        }
+
+        return true;
+    });
+}
+
+void
 ValidMPTIssuance::visitEntry(bool isDelete, SLE::ConstRef before, SLE::ConstRef after)
 {
     // The sfReferenceHolding tracking and the deleted-holding capture are

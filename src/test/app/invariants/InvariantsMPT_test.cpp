@@ -9,11 +9,13 @@
 
 #include <xrpl/basics/base_uint.h>
 #include <xrpl/beast/unit_test/suite.h>
+#include <xrpl/json/json_value.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
+#include <xrpl/protocol/Keylet.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
@@ -28,6 +30,7 @@
 #include <xrpl/protocol/TxFormats.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/XRPAmount.h>
+#include <xrpl/protocol/jss.h>
 #include <xrpl/tx/ApplyContext.h>
 #include <xrpl/tx/applySteps.h>
 
@@ -1831,6 +1834,153 @@ class InvariantsMPT_test : public InvariantsBase
             setupSingle);
     }
 
+    void
+    testTokenPreauth()
+    {
+        using namespace test::jtx;
+        testcase << "ValidTokenPreauth";
+
+        MPTID mptID;
+
+        auto const tokenTx =
+            [&mptID](
+                json::StaticString const& txType, Account const& issuer, Account const& holder) {
+                json::Value jv;
+                jv[jss::TransactionType] = txType;
+                jv[jss::Account] = issuer.human();
+                jv[sfHolder.jsonName] = holder.human();
+                jv[sfMPTokenIssuanceID.jsonName] = to_string(mptID);
+                return jv;
+            };
+        auto const tokenPreauth = [&tokenTx](Account const& issuer, Account const& holder) {
+            return tokenTx(jss::TokenPreauth, issuer, holder);
+        };
+        auto const tokenBlock = [&tokenTx](Account const& issuer, Account const& holder) {
+            return tokenTx(jss::TokenBlock, issuer, holder);
+        };
+
+        // Insert a TokenPreauth or TokenBlock entry directly, bypassing the
+        // transactor.
+        auto const insertEntry = [&mptID](
+                                     ApplyContext& ac,
+                                     Keylet const& keylet,
+                                     Account const& owner,
+                                     Account const& holder) {
+            auto const sle = std::make_shared<SLE>(keylet);
+            sle->setAccountID(sfAccount, owner.id());
+            sle->setAccountID(sfHolder, holder.id());
+            sle->setFieldH192(sfMPTokenIssuanceID, mptID);
+            sle->setFieldU64(sfOwnerNode, 0);
+            ac.view().insert(sle);
+        };
+
+        auto const createIssuance = [&mptID](Account const& a1, Account const& a2, Env& env) {
+            MPTTester mpt(env, a1, {.holders = {a2}, .fund = false});
+            mpt.create({.flags = tfMPTCanLock});
+            mptID = mpt.issuanceID();
+            return mpt;
+        };
+
+        // A holder that is both pre-authorized and blocked.
+        doInvariantCheck(
+            {{"holder is both pre-authorized and blocked"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                insertEntry(ac, keylet::tokenBlock(a2, mptID), a1, a2);
+                return true;
+            },
+            XRPAmount{},
+            STTx{ttTOKEN_PREAUTH, [](STObject&) {}},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            [&](Account const& a1, Account const& a2, Env& env) {
+                createIssuance(a1, a2, env);
+                env(tokenPreauth(a1, a2));
+                env.close();
+                return true;
+            });
+
+        // An entry not owned by the issuer of its issuance.
+        doInvariantCheck(
+            {{"TokenPreauth/TokenBlock not owned by the issuer, or names the issuer as holder"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                insertEntry(ac, keylet::tokenPreauth(a1, mptID), a2, a1);
+                return true;
+            },
+            XRPAmount{},
+            STTx{ttTOKEN_PREAUTH, [](STObject&) {}},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            [&](Account const& a1, Account const& a2, Env& env) {
+                createIssuance(a1, a2, env);
+                return true;
+            });
+
+        // An unlocked MPToken created for a blocked holder.
+        doInvariantCheck(
+            {{"unlocked MPToken created for a blocked holder"}},
+            [&](Account const&, Account const& a2, ApplyContext& ac) {
+                // createMPToken itself refuses a blocked holder, so insert
+                // the MPToken directly.
+                auto const sle = std::make_shared<SLE>(keylet::mptoken(mptID, a2));
+                sle->setAccountID(sfAccount, a2.id());
+                sle->setFieldH192(sfMPTokenIssuanceID, mptID);
+                sle->setFieldU64(sfOwnerNode, 0);
+                ac.view().insert(sle);
+                return true;
+            },
+            XRPAmount{},
+            STTx{ttMPTOKEN_AUTHORIZE, [](STObject&) {}},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            [&](Account const& a1, Account const& a2, Env& env) {
+                createIssuance(a1, a2, env);
+                env(tokenBlock(a1, a2));
+                env.close();
+                return true;
+            });
+
+        // An existing MPToken of a blocked holder authorized while the block
+        // lasts.
+        doInvariantCheck(
+            {{"blocked holder's MPToken is authorized"}},
+            [&](Account const&, Account const& a2, ApplyContext& ac) {
+                // MPTokenAuthorize itself refuses to authorize a blocked
+                // holder, so set the flag directly.
+                auto const sle = ac.view().peek(keylet::mptoken(mptID, a2));
+                if (!sle)
+                    return false;
+                sle->setFlag(lsfMPTAuthorized);
+                ac.view().update(sle);
+                return true;
+            },
+            XRPAmount{},
+            STTx{ttMPTOKEN_AUTHORIZE, [](STObject&) {}},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            [&](Account const& a1, Account const& a2, Env& env) {
+                createIssuance(a1, a2, env).authorize({.account = a2});
+                env(tokenBlock(a1, a2));
+                env.close();
+                return true;
+            });
+
+        // A block that leaves the holder's MPToken authorized.
+        doInvariantCheck(
+            {{"blocked holder's MPToken is still authorized"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                insertEntry(ac, keylet::tokenBlock(a2, mptID), a1, a2);
+                return true;
+            },
+            XRPAmount{},
+            STTx{ttTOKEN_BLOCK, [](STObject&) {}},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            [&](Account const& a1, Account const& a2, Env& env) {
+                // An authorized holder on a RequireAuth issuance.
+                MPTTester mpt(env, a1, {.holders = {a2}, .fund = false});
+                mpt.create({.flags = tfMPTCanLock | tfMPTRequireAuth});
+                mptID = mpt.issuanceID();
+                mpt.authorize({.account = a2});
+                mpt.authorize({.account = a1, .holder = a2});
+                return true;
+            });
+    }
+
 public:
     void
     run() override
@@ -1838,6 +1988,7 @@ public:
         testConfidentialMPTTransfer();
         testMPT();
         testDeleteWithBalanceTwoHolders();
+        testTokenPreauth();
     }
 };
 
