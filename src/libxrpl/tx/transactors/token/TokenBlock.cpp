@@ -3,6 +3,7 @@
 #include <xrpl/beast/utility/Journal.h>
 #include <xrpl/ledger/helpers/AccountRootHelpers.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -92,7 +93,22 @@ TokenBlock::doApply()
             return ter;  // LCOV_EXCL_LINE
     }
 
-    return TokenPreauth::createEntry(ctx_, preFeeBalance_, blockKeylet, j_);
+    if (auto const ter = TokenPreauth::createEntry(ctx_, preFeeBalance_, blockKeylet, j_);
+        !isTesSuccess(ter))
+        return ter;
+
+    // A block stops the holder from obtaining a holding, and revokes the
+    // issuer's approval of one it already has: a blocked holder is never
+    // authorized (which only matters on an issuance that requires
+    // authorization). It does not freeze an existing holding; that is what
+    // Lock is for, as a separate issuer action.
+    if (auto const sleMpt = view().peek(keylet::mptoken(issuanceID, holder));
+        sleMpt && sleMpt->isFlag(lsfMPTAuthorized))
+    {
+        sleMpt->clearFlag(lsfMPTAuthorized);
+        view().update(sleMpt);
+    }
+    return tesSUCCESS;
 }
 
 void

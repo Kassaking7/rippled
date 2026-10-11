@@ -76,13 +76,18 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
 
                 return tecHAS_OBLIGATIONS;
             }
-            if (ctx.view.rules().enabled(fixCleanup3_4_0))
+            // A blocked holder that the issuer has locked must still be able
+            // to delete an empty MPToken and recover the reserve; the block
+            // stops it from creating the MPToken again.
+            bool const blocked = isMPTBlocked(ctx.view, ctx.tx[sfMPTokenIssuanceID], accountID);
+            if (!blocked && ctx.view.rules().enabled(fixCleanup3_4_0))
             {
                 if (sleMptIssuance && sleMpt->isFlag(lsfMPTLocked))
                     return tecNO_PERMISSION;
             }
             else if (
-                ctx.view.rules().enabled(featureSingleAssetVault) && sleMpt->isFlag(lsfMPTLocked))
+                !blocked && ctx.view.rules().enabled(featureSingleAssetVault) &&
+                sleMpt->isFlag(lsfMPTLocked))
             {
                 return tecNO_PERMISSION;
             }
@@ -107,6 +112,9 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
         }
 
         // Now test when the holder wants to hold/create/authorize a new MPT
+        if (isMPTBlocked(ctx.view, ctx.tx[sfMPTokenIssuanceID], accountID))
+            return tecTOKEN_BLOCKED;
+
         if (!sleMptIssuance)
             return tecOBJECT_NOT_FOUND;
 
@@ -119,6 +127,13 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
 
         return tesSUCCESS;
     }
+
+    // The issuer may still revoke authorization from a blocked holder, but
+    // may not grant it. Checked first: a block may name an address that has
+    // no account yet.
+    if (!ctx.tx.isFlag(tfMPTUnauthorize) &&
+        isMPTBlocked(ctx.view, ctx.tx[sfMPTokenIssuanceID], *holderID))
+        return tecTOKEN_BLOCKED;
 
     auto const sleHolder = ctx.view.read(keylet::account(*holderID));
     if (!sleHolder)
@@ -160,14 +175,38 @@ TER
 MPTokenAuthorize::doApply()
 {
     auto const& tx = ctx_.tx;
-    return authorizeMPToken(
-        ctx_.getApplyViewContext(),
-        preFeeBalance_,
-        tx[sfMPTokenIssuanceID],
-        accountID_,
-        ctx_.journal,
-        tx.getFlags(),
-        tx[~sfHolder]);
+    auto const mptIssuanceID = tx[sfMPTokenIssuanceID];
+    if (auto const ter = authorizeMPToken(
+            ctx_.getApplyViewContext(),
+            preFeeBalance_,
+            mptIssuanceID,
+            accountID_,
+            ctx_.journal,
+            tx.getFlags(),
+            tx[~sfHolder]);
+        !isTesSuccess(ter))
+        return ter;
+
+    // A holder the issuer pre-authorized with TokenPreauth is authorized as
+    // soon as they create their MPToken, without a second issuer transaction.
+    if (!view().rules().enabled(featureTokenPreauth) || tx.isFieldPresent(sfHolder) ||
+        tx.isFlag(tfMPTUnauthorize))
+        return tesSUCCESS;
+
+    auto const sleMptIssuance = view().read(keylet::mptokenIssuance(mptIssuanceID));
+    if (!sleMptIssuance || !sleMptIssuance->isFlag(lsfMPTRequireAuth))
+        return tesSUCCESS;
+
+    if (!view().exists(keylet::tokenPreauth(accountID_, mptIssuanceID)))
+        return tesSUCCESS;
+
+    auto const sleMpt = view().peek(keylet::mptoken(mptIssuanceID, accountID_));
+    if (!sleMpt)
+        return tefINTERNAL;  // LCOV_EXCL_LINE
+
+    sleMpt->setFlag(lsfMPTAuthorized);
+    view().update(sleMpt);
+    return tesSUCCESS;
 }
 
 void

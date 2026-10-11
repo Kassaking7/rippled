@@ -280,6 +280,296 @@ class TokenPreauth_test : public beast::unit_test::Suite
         BEAST_EXPECT(state() == "none");
         BEAST_EXPECT(env.ownerCount(gw) == baseOwners);
     }
+    void
+    testBlockOptIn(FeatureBitset features)
+    {
+        testcase("Blocked account can not opt in (PRD R1, R2)");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        // Permissionless issuance: no RequireAuth.
+        MPTTester mpt(env, gw, {.holders = {alice, bob}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTCanTransfer});
+        auto const id = mpt.issuanceID();
+
+        env(tokenBlock(gw, alice, id));
+        env.close();
+
+        // Hard fail with the dedicated code; no MPToken is created.
+        mpt.authorize({.account = alice, .err = tecTOKEN_BLOCKED});
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+
+        // Everyone else still opts in freely.
+        mpt.authorize({.account = bob});
+        mpt.pay(gw, bob, 100);
+
+        // Removing the entry restores the ability to opt in, effective in the
+        // next ledger.
+        env(tokenBlock(gw, alice, id, tfUnblock));
+        env.close();
+        mpt.authorize({.account = alice});
+        mpt.pay(gw, alice, 100);
+        BEAST_EXPECT(mpt.getBalance(alice) == 100);
+    }
+
+    void
+    testBlockBeforeAccountExists(FeatureBitset features)
+    {
+        testcase("Block an address before it is funded");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const sanctioned{"sanctioned"};
+        MPTTester mpt(env, gw);
+        mpt.create({.flags = tfMPTCanLock});
+        auto const id = mpt.issuanceID();
+
+        env(tokenBlock(gw, sanctioned, id));
+        env.close();
+
+        // Funding the address does not open a window to opt in.
+        env.fund(XRP(1'000), sanctioned);
+        env.close();
+        MPTTester(env, gw, id, {sanctioned}, true)
+            .authorize({.account = sanctioned, .err = tecTOKEN_BLOCKED});
+        BEAST_EXPECT(!hasMPToken(env, sanctioned, id));
+    }
+
+    void
+    testBlockExistingHolder(FeatureBitset features)
+    {
+        testcase("Blocking an existing holder does not freeze it");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        MPTTester mpt(env, gw, {.holders = {alice, bob}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTCanTransfer | tfMPTCanClawback});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.authorize({.account = bob});
+        mpt.pay(gw, alice, 1'000);
+        mpt.pay(gw, bob, 1'000);
+
+        // Pre-authorized and holding; blocking flips the entry.
+        env(tokenPreauth(gw, alice, id));
+        env(tokenBlock(gw, alice, id));
+        env.close();
+        BEAST_EXPECT(isBlocked(env, alice, id));
+        BEAST_EXPECT(!isPreauthorized(env, alice, id));
+
+        // A block only stops a holding from being created: the existing one
+        // is not locked, and its balance still moves both ways.
+        BEAST_EXPECT(!isLocked(env, alice, id));
+        BEAST_EXPECT(mpt.getBalance(alice) == 1'000);
+        mpt.pay(alice, bob, 10);
+        mpt.pay(bob, alice, 10);
+
+        // Freezing it is Lock, a separate issuer action that the block does
+        // not restrict in either direction.
+        mpt.set({.holder = alice, .flags = tfMPTLock});
+        mpt.pay(alice, bob, 10, tecPATH_DRY);
+        mpt.pay(bob, alice, 10, tecPATH_DRY);
+        mpt.set({.holder = alice, .flags = tfMPTUnlock});
+        mpt.pay(alice, bob, 10);
+
+        // Clawback is unchanged and still seizes the balance.
+        mpt.claw(gw, alice, 400);
+        BEAST_EXPECT(mpt.getBalance(alice) == 590);
+
+        // Unblocking leaves the holding as it is.
+        env(tokenBlock(gw, alice, id, tfUnblock));
+        env.close();
+        BEAST_EXPECT(!isBlocked(env, alice, id));
+        mpt.pay(alice, bob, 10);
+    }
+
+    void
+    testBlockedHolderCanExit(FeatureBitset features)
+    {
+        testcase("Blocked holder can delete an empty MPToken, but not re-create it");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        MPTTester mpt(env, gw, {.holders = {alice}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTCanClawback});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.pay(gw, alice, 100);
+
+        // Blocked, and locked by a separate issuer action.
+        env(tokenBlock(gw, alice, id));
+        mpt.set({.holder = alice, .flags = tfMPTLock});
+        env.close();
+        BEAST_EXPECT(isLocked(env, alice, id));
+
+        // Non-zero balance: the usual obligation check still applies.
+        mpt.authorize({.account = alice, .flags = tfMPTUnauthorize, .err = tecHAS_OBLIGATIONS});
+
+        mpt.claw(gw, alice, 100);
+        auto const aliceOwners = env.ownerCount(alice);
+
+        // Zero balance: allowed even though the MPToken is locked, so the
+        // holder can recover its reserve.
+        mpt.authorize({.account = alice, .flags = tfMPTUnauthorize});
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+        BEAST_EXPECT(env.ownerCount(alice) == aliceOwners - 1);
+
+        // Deleting and re-creating is not a way around the lock.
+        mpt.authorize({.account = alice, .err = tecTOKEN_BLOCKED});
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+
+        // A locked but *unblocked* holder still can not delete (unchanged).
+        Account const bob{"bob"};
+        env.fund(XRP(1'000), bob);
+        env.close();
+        MPTTester m2(env, gw, id, {bob}, true);
+        m2.authorize({.account = bob});
+        m2.set({.holder = bob, .flags = tfMPTLock});
+        m2.authorize({.account = bob, .flags = tfMPTUnauthorize, .err = tecNO_PERMISSION});
+    }
+
+    void
+    testRequireAuth(FeatureBitset features)
+    {
+        testcase("RequireAuth issuance: pre-authorization and block");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const carol{"carol"};
+        MPTTester mpt(env, gw, {.holders = {alice, bob, carol}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTRequireAuth});
+        auto const id = mpt.issuanceID();
+
+        // Pre-authorized: one holder transaction, no issuer follow-up.
+        env(tokenPreauth(gw, alice, id));
+        env.close();
+        mpt.authorize({.account = alice});
+        BEAST_EXPECT(mpt.checkFlags(lsfMPTAuthorized, alice));
+        mpt.pay(gw, alice, 100);
+
+        // Not pre-authorized: the classic two-step flow still works.
+        mpt.authorize({.account = bob});
+        BEAST_EXPECT(mpt.checkFlags(0, bob));
+        mpt.pay(gw, bob, 100, tecNO_AUTH);
+        mpt.authorize({.account = gw, .holder = bob});
+        mpt.pay(gw, bob, 100);
+
+        // The issuer can not approve a blocked holder ...
+        mpt.authorize({.account = carol});
+        env(tokenBlock(gw, carol, id));
+        env.close();
+        mpt.authorize({.account = gw, .holder = carol, .err = tecTOKEN_BLOCKED});
+        // Blocking an authorized holder revokes its authorization, without
+        // locking it, and the issuer can not re-authorize it while blocked.
+        env(tokenBlock(gw, alice, id));
+        env.close();
+        BEAST_EXPECT(mpt.checkFlags(0, alice));
+        mpt.pay(gw, alice, 1, tecNO_AUTH);
+        mpt.authorize({.account = gw, .holder = alice, .err = tecTOKEN_BLOCKED});
+        // Revoking is still allowed (and here a no-op).
+        mpt.authorize({.account = gw, .holder = alice, .flags = tfMPTUnauthorize});
+        BEAST_EXPECT(mpt.checkFlags(0, alice));
+
+        // Unblocking does not restore the authorization: reinstating the
+        // holder is unblock, then re-authorize.
+        env(tokenBlock(gw, alice, id, tfUnblock));
+        env.close();
+        BEAST_EXPECT(mpt.checkFlags(0, alice));
+        mpt.pay(gw, alice, 1, tecNO_AUTH);
+        mpt.authorize({.account = gw, .holder = alice});
+        BEAST_EXPECT(mpt.checkFlags(lsfMPTAuthorized, alice));
+        mpt.pay(gw, alice, 1);
+
+        // A block also replaces a pre-authorization and revokes the
+        // authorization it granted.
+        Account const frank{"frank"};
+        env.fund(XRP(1'000), frank);
+        env.close();
+        MPTTester m4(env, gw, id, {frank}, true);
+        env(tokenPreauth(gw, frank, id));
+        env.close();
+        m4.authorize({.account = frank});
+        BEAST_EXPECT(m4.checkFlags(lsfMPTAuthorized, frank));
+        env(tokenBlock(gw, frank, id));
+        env.close();
+        BEAST_EXPECT(!isPreauthorized(env, frank, id));
+        BEAST_EXPECT(m4.checkFlags(0, frank));
+
+        // The block check comes first, so it applies even to an address that
+        // has no account yet.
+        Account const ghost{"ghost"};
+        env(tokenBlock(gw, ghost, id));
+        env.close();
+        mpt.authorize({.account = gw, .holder = ghost, .err = tecTOKEN_BLOCKED});
+
+        // Removing a pre-authorization does not revoke an authorized MPToken.
+        Account const dave{"dave"};
+        env.fund(XRP(1'000), dave);
+        env.close();
+        MPTTester m2(env, gw, id, {dave}, true);
+        env(tokenPreauth(gw, dave, id));
+        env.close();
+        m2.authorize({.account = dave});
+        env(tokenPreauth(gw, dave, id, tfUnauthorize));
+        env.close();
+        BEAST_EXPECT(m2.checkFlags(lsfMPTAuthorized, dave));
+
+        // Pre-authorizing a holder who already opted in authorizes them right
+        // away: they have no later transaction that would pick it up.
+        Account const erin{"erin"};
+        env.fund(XRP(1'000), erin);
+        env.close();
+        MPTTester m3(env, gw, id, {erin}, true);
+        m3.authorize({.account = erin});
+        BEAST_EXPECT(m3.checkFlags(0, erin));
+        m3.pay(gw, erin, 100, tecNO_AUTH);
+        env(tokenPreauth(gw, erin, id));
+        env.close();
+        BEAST_EXPECT(m3.checkFlags(lsfMPTAuthorized, erin));
+        m3.pay(gw, erin, 100);
+    }
+
+    void
+    testPermissionlessPreauthIsNoop(FeatureBitset features)
+    {
+        testcase("Pre-authorization is a no-op without RequireAuth");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        MPTTester mpt(env, gw, {.holders = {alice}});
+        mpt.create({.flags = tfMPTCanLock});
+        auto const id = mpt.issuanceID();
+
+        env(tokenPreauth(gw, alice, id));
+        env.close();
+        mpt.authorize({.account = alice});
+        BEAST_EXPECT(mpt.checkFlags(0, alice));
+        mpt.pay(gw, alice, 100);
+
+        // Same when the holder opted in first.
+        Account const bob{"bob"};
+        env.fund(XRP(1'000), bob);
+        env.close();
+        MPTTester m2(env, gw, id, {bob}, true);
+        m2.authorize({.account = bob});
+        env(tokenPreauth(gw, bob, id));
+        env.close();
+        BEAST_EXPECT(m2.checkFlags(0, bob));
+    }
 
     void
     testDestroyedIssuanceCleanup(FeatureBitset features)
@@ -595,6 +885,12 @@ public:
         testPreflight(all);
         testPreclaim(all);
         testStateMachine(all);
+        testBlockOptIn(all);
+        testBlockBeforeAccountExists(all);
+        testBlockExistingHolder(all);
+        testBlockedHolderCanExit(all);
+        testRequireAuth(all);
+        testPermissionlessPreauthIsNoop(all);
         testDestroyedIssuanceCleanup(all);
         testAccountDelete(all);
         testReserve(all);

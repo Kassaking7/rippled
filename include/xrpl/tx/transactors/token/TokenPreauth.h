@@ -22,7 +22,9 @@ namespace xrpl {
  * A pre-authorization is recorded as an issuer-owned TokenPreauth ledger
  * entry keyed by (holder, issuance). It can not coexist with a TokenBlock
  * entry for the same key (see TokenBlock): a blocked holder can not be
- * pre-authorized.
+ * pre-authorized. On an issuance that requires authorization, a pre-authorized
+ * holder's MPToken is authorized when it is created, or right away if it
+ * already exists.
  *
  * The two ledger entry types share their layout and lifecycle, so the helpers
  * that create and remove them live here and are reused by TokenBlock and

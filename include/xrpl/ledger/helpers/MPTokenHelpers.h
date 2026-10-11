@@ -133,6 +133,17 @@ authorizeMPToken(
     std::optional<AccountID> holderID = std::nullopt);
 
 /**
+ * Returns true if the issuer of @p mptIssuanceID has blocked @p holder from
+ * that issuance with a TokenBlock entry.
+ *
+ * Code that creates an MPToken checks this, so a blocked account can not
+ * acquire one. It does not by itself restrict an MPToken that already exists;
+ * freezing that is a separate issuer Lock.
+ */
+[[nodiscard]] bool
+isMPTBlocked(ReadView const& view, MPTID const& mptIssuanceID, AccountID const& holder);
+
+/**
  * Check if the account lacks required authorization for MPT.
  *
  * requireAuth check is recursive for MPT shares in a vault, descending to

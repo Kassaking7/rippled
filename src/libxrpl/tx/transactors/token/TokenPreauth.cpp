@@ -9,6 +9,7 @@
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Keylet.h>
+#include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -94,7 +95,26 @@ TokenPreauth::doApply()
     if (ctx_.tx.isFlag(tfUnauthorize))
         return removeFromLedger(view(), view().peek(preauthKeylet), j_);
 
-    return createEntry(ctx_, preFeeBalance_, preauthKeylet, j_);
+    if (auto const ter = createEntry(ctx_, preFeeBalance_, preauthKeylet, j_); !isTesSuccess(ter))
+        return ter;
+
+    // Pre-authorizing a holder who already opted in authorizes their MPToken
+    // now, since they have no further transaction that would pick it up.
+    auto const sleMpt = view().peek(keylet::mptoken(issuanceID, holder));
+    if (!sleMpt)
+        return tesSUCCESS;
+
+    auto const sleIssuance = view().read(keylet::mptokenIssuance(issuanceID));
+    if (!sleIssuance)
+        return tefINTERNAL;  // LCOV_EXCL_LINE
+
+    if (sleIssuance->isFlag(lsfMPTRequireAuth) && !sleMpt->isFlag(lsfMPTAuthorized))
+    {
+        sleMpt->setFlag(lsfMPTAuthorized);
+        view().update(sleMpt);
+    }
+
+    return tesSUCCESS;
 }
 
 TER

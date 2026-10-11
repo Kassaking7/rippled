@@ -19,7 +19,9 @@ namespace xrpl {
  *
  * A block is recorded as an issuer-owned TokenBlock ledger entry keyed by
  * (holder, issuance), and replaces a TokenPreauth entry for the same key if
- * there is one.
+ * there is one. A blocked holder can not obtain an MPToken for the issuance,
+ * and an MPToken it already has is no longer authorized. A block does not
+ * freeze an existing holding: that is Lock, a separate issuer action.
  */
 class TokenBlock : public Transactor
 {

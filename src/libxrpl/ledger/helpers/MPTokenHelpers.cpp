@@ -241,6 +241,9 @@ authorizeMPToken(
         //      - add the new mptokenKey to the owner directory
         //      - create the MPToken object for the holder
 
+        if (isMPTBlocked(ctx.view, mptIssuanceID, account))
+            return tecTOKEN_BLOCKED;
+
         // A reserve sponsor only covers tx.Account's own objects.
         auto const sponsorExp = getEffectiveTxReserveSponsor(ctx, sleAcct);
         if (!sponsorExp)
@@ -368,6 +371,18 @@ removeEmptyHolding(
         journal,
         tfMPTUnauthorize  // flags
     );
+}
+
+bool
+isMPTBlocked(ReadView const& view, MPTID const& mptIssuanceID, AccountID const& holder)
+{
+    if (!view.rules().enabled(featureTokenPreauth))
+        return false;
+
+    if (MPTIssue{mptIssuanceID}.getIssuer() == holder)
+        return false;
+
+    return view.exists(keylet::tokenBlock(holder, mptIssuanceID));
 }
 
 [[nodiscard]] TER
