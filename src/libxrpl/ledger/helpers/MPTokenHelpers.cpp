@@ -454,6 +454,11 @@ requireAuth(
     auto const mptokenID = keylet::mptoken(mptID.key, account);
     auto const sleToken = view.read(mptokenID);
 
+    // A blocked account may not acquire a holding by any path. An existing
+    // MPToken is not affected; freezing it is a separate issuer Lock.
+    if (!sleToken && isMPTBlocked(view, mptIssue.getMptID(), account))
+        return tecTOKEN_BLOCKED;
+
     // if account has no MPToken, fail
     if (!sleToken && (authType == AuthType::StrongAuth || authType == AuthType::Legacy))
         return tecNO_AUTH;
@@ -993,6 +998,13 @@ createMPToken(
     SLE::Ref sponsorSle,
     std::uint32_t const flags)
 {
+    // Callers check requireAuth first, which already rejects a blocked holder.
+    // The one caller that deliberately bypasses it (AMMClawback recreating a
+    // holding to seize from) creates the MPToken locked; nothing else may
+    // create one for a blocked holder.
+    if ((flags & lsfMPTLocked) == 0u && isMPTBlocked(view, mptIssuanceID, account))
+        return tecTOKEN_BLOCKED;
+
     auto const mptokenKey = keylet::mptoken(mptIssuanceID, account);
 
     auto const ownerNode =

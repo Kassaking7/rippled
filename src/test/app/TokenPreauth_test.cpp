@@ -1,13 +1,18 @@
 #include <test/jtx/AMM.h>
 #include <test/jtx/Account.h>
 #include <test/jtx/Env.h>
+#include <test/jtx/TestHelpers.h>
 #include <test/jtx/acctdelete.h>
 #include <test/jtx/amount.h>
+#include <test/jtx/check.h>
 #include <test/jtx/delegate.h>
+#include <test/jtx/escrow.h>
 #include <test/jtx/fee.h>
 #include <test/jtx/mpt.h>
+#include <test/jtx/offer.h>
 #include <test/jtx/pay.h>
 #include <test/jtx/ter.h>
+#include <test/jtx/vault.h>
 
 #include <xrpl/basics/base_uint.h>
 #include <xrpl/beast/unit_test/suite.h>
@@ -15,6 +20,7 @@
 #include <xrpl/json/to_string.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/Issue.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/TER.h>
@@ -23,6 +29,7 @@
 #include <xrpl/protocol/jss.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -306,6 +313,10 @@ class TokenPreauth_test : public beast::unit_test::Suite
         mpt.authorize({.account = bob});
         mpt.pay(gw, bob, 100);
 
+        // The blocked account can not be paid either: it has no holding.
+        mpt.pay(gw, alice, 100, tecTOKEN_BLOCKED);
+        mpt.pay(bob, alice, 10, tecTOKEN_BLOCKED);
+
         // Removing the entry restores the ability to opt in, effective in the
         // next ledger.
         env(tokenBlock(gw, alice, id, tfUnblock));
@@ -569,6 +580,249 @@ class TokenPreauth_test : public beast::unit_test::Suite
         env(tokenPreauth(gw, bob, id));
         env.close();
         BEAST_EXPECT(m2.checkFlags(0, bob));
+    }
+    void
+    testDexCannotBypass(FeatureBitset features)
+    {
+        testcase("DEX offer crossing can not create a holding for a blocked account");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const carol{"carol"};
+        MPTTester mpt(env, gw, {.holders = {alice, carol}});
+        mpt.create({.flags = tfMPTCanLock | kMptDexFlags});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.pay(gw, alice, 1'000);
+        MPT const token = mpt;
+
+        // carol has no MPToken; with MPTokensV2 an offer to buy one is fine
+        // and crossing would create the holding.
+        env(offer(carol, token(100), XRP(100)));
+        env.close();
+        BEAST_EXPECT(env.ownerCount(carol) == 1);
+
+        env(tokenBlock(gw, carol, id));
+        env.close();
+
+        // alice sells into carol's standing offer: the offer is removed as
+        // unfunded-for-auth instead of crossing.
+        env(offer(alice, XRP(100), token(100)));
+        env.close();
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+        BEAST_EXPECT(env.ownerCount(carol) == 0);
+        BEAST_EXPECT(mpt.getBalance(alice) == 1'000);
+
+        // carol can not place a new offer to acquire the token either, as
+        // maker or as taker against alice's resting offer.
+        env(offer(carol, token(100), XRP(100)), Ter(tecTOKEN_BLOCKED));
+        env.close();
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+    }
+
+    void
+    testCheckCannotBypass(FeatureBitset features)
+    {
+        testcase("CheckCash can not create a holding for a blocked account");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const carol{"carol"};
+        MPTTester mpt(env, gw, {.holders = {alice, carol}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTCanTransfer});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.pay(gw, alice, 1'000);
+        MPT const token = mpt;
+
+        UInt256 const fromHolder = getCheckIndex(alice, env.seq(alice));
+        env(check::create(alice, carol, token(50)));
+        UInt256 const fromIssuer = getCheckIndex(gw, env.seq(gw));
+        env(check::create(gw, carol, token(50)));
+        env.close();
+
+        env(tokenBlock(gw, carol, id));
+        env.close();
+
+        env(check::cash(carol, fromHolder, token(50)), Ter(tecTOKEN_BLOCKED));
+        env(check::cash(carol, fromIssuer, token(50)), Ter(tecTOKEN_BLOCKED));
+        env.close();
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+
+        // Like any account that can not yet hold the token, a blocked one can
+        // still be written a check; it just can never cash it.
+        UInt256 const later = getCheckIndex(alice, env.seq(alice));
+        env(check::create(alice, carol, token(50)));
+        env.close();
+        env(check::cash(carol, later, token(50)), Ter(tecTOKEN_BLOCKED));
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+    }
+
+    void
+    testEscrowCannotBypass(FeatureBitset features)
+    {
+        testcase("EscrowFinish can not create a holding for a blocked account");
+        using namespace jtx;
+        using namespace std::chrono_literals;
+
+        Env env{*this, features};
+        auto const baseFee = env.current()->fees().base;
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const carol{"carol"};
+        MPTTester mpt(env, gw, {.holders = {alice, carol}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTCanEscrow | tfMPTCanTransfer});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.pay(gw, alice, 1'000);
+        MPT const token = mpt;
+
+        auto const seq = env.seq(alice);
+        env(escrow::create(alice, carol, token(100)),
+            escrow::kFinishTime(env.now() + 1s),
+            escrow::kCancelTime(env.now() + 10s),
+            Fee(baseFee * 150));
+        env.close();
+
+        env(tokenBlock(gw, carol, id));
+        env.close();
+
+        env(escrow::finish(carol, alice, seq), Fee(baseFee * 150), Ter(tecTOKEN_BLOCKED));
+        env.close();
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+
+        // New escrows to the blocked account are rejected up front.
+        env(escrow::create(alice, carol, token(100)),
+            escrow::kFinishTime(env.now() + 1s),
+            Fee(baseFee * 150),
+            Ter(tecTOKEN_BLOCKED));
+
+        // The sender recovers the funds when the escrow expires.
+        env.close(10s);
+        env(escrow::cancel(alice, alice, seq), Fee(baseFee * 150));
+        env.close();
+        BEAST_EXPECT(mpt.getBalance(alice) == 1'000);
+    }
+
+    void
+    testAMMWithdrawCannotBypass(FeatureBitset features)
+    {
+        testcase("AMMWithdraw can not create a holding for a blocked account");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const carol{"carol"};
+        MPTTester mpt(env, gw, {.holders = {carol}});
+        mpt.create({.flags = tfMPTCanLock | kMptDexFlags});
+        auto const id = mpt.issuanceID();
+        MPT const token = mpt;
+
+        // carol becomes an LP with XRP only, so she never holds the token.
+        AMM amm(env, gw, token(1'000), XRP(1'000));
+        amm.deposit(carol, XRP(100));
+        env.close();
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+
+        env(tokenBlock(gw, carol, id));
+        env.close();
+
+        // Neither a single-asset nor a full withdrawal can pay her the token.
+        amm.withdraw(carol, token(10), std::nullopt, std::nullopt, Ter(tecTOKEN_BLOCKED));
+        amm.withdrawAll(carol, std::nullopt, Ter(tecTOKEN_BLOCKED));
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+
+        // She can still take her share out in XRP.
+        amm.withdrawAll(carol, XRP(0));
+        BEAST_EXPECT(!hasMPToken(env, carol, id));
+    }
+
+    void
+    testVaultWithdrawCannotBypass(FeatureBitset features)
+    {
+        testcase("VaultWithdraw can not create a holding for a blocked account");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const carol{"carol"};
+        MPTTester mpt(env, gw, {.holders = {alice, bob, carol}});
+        mpt.create({.flags = tfMPTCanLock | kMptDexFlags});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.authorize({.account = bob});
+        mpt.pay(gw, alice, 100);
+        MPT const token = mpt;
+
+        Vault const vault{env};
+        auto [createTx, keylet] = vault.create({.owner = carol, .asset = token});
+        env(createTx);
+        env.close();
+
+        // alice moves her whole balance into the vault, is blocked, and
+        // deletes her now-empty MPToken.
+        env(vault.deposit({.depositor = alice, .id = keylet.key, .amount = token(100)}));
+        env.close();
+        env(tokenBlock(gw, alice, id));
+        env.close();
+        mpt.authorize({.account = alice, .flags = tfMPTUnauthorize});
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+
+        // Redeeming her shares to herself would need a new holding.
+        env(vault.withdraw({.depositor = alice, .id = keylet.key, .amount = token(10)}),
+            Ter(tecTOKEN_BLOCKED));
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+
+        // Redeeming to another account that holds the token is not affected.
+        auto tx = vault.withdraw({.depositor = alice, .id = keylet.key, .amount = token(10)});
+        tx[sfDestination] = bob.human();
+        env(tx);
+        env.close();
+        BEAST_EXPECT(mpt.getBalance(bob) == 10);
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+    }
+
+    void
+    testAMMClawbackBlockedHolder(FeatureBitset features)
+    {
+        testcase("AMMClawback still seizes from a blocked holder with no MPToken");
+        using namespace jtx;
+
+        Env env{*this, features};
+        Account const gw{"gw"};
+        Account const alice{"alice"};
+        MPTTester mpt(env, gw, {.holders = {alice}});
+        mpt.create({.flags = tfMPTCanLock | tfMPTCanClawback | kMptDexFlags});
+        auto const id = mpt.issuanceID();
+        mpt.authorize({.account = alice});
+        mpt.pay(gw, alice, 100);
+        MPT const token = mpt;
+
+        // alice moves her whole balance into an AMM pool ...
+        AMM const amm(env, alice, token(100), XRP(100));
+        env.close();
+        BEAST_EXPECT(mpt.getBalance(alice) == 0);
+
+        // ... is blocked, and deletes her now-empty, locked MPToken.
+        env(tokenBlock(gw, alice, id));
+        env.close();
+        mpt.authorize({.account = alice, .flags = tfMPTUnauthorize});
+        BEAST_EXPECT(!hasMPToken(env, alice, id));
+
+        // The issuer can still claw back its token from the pool. The holding
+        // recreated for that purpose is locked and, unlike for a holder that
+        // is not blocked, not authorized.
+        env(amm::ammClawback(gw, alice, MPTIssue{id}, xrpIssue(), std::nullopt));
+        env.close();
+        BEAST_EXPECT(isLocked(env, alice, id));
+        BEAST_EXPECT(mpt.checkFlags(lsfMPTLocked, alice));
+        BEAST_EXPECT(mpt.getBalance(alice) == 0);
     }
 
     void
@@ -891,6 +1145,12 @@ public:
         testBlockedHolderCanExit(all);
         testRequireAuth(all);
         testPermissionlessPreauthIsNoop(all);
+        testDexCannotBypass(all);
+        testCheckCannotBypass(all);
+        testEscrowCannotBypass(all);
+        testAMMWithdrawCannotBypass(all);
+        testVaultWithdrawCannotBypass(all);
+        testAMMClawbackBlockedHolder(all);
         testDestroyedIssuanceCleanup(all);
         testAccountDelete(all);
         testReserve(all);

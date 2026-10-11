@@ -720,7 +720,11 @@ AMMWithdraw::withdraw(
             if (auto const err = requireAuth(view, mptIssue, account, AuthType::WeakAuth);
                 !isTesSuccess(err))
             {
-                if (authHandling != AuthHandling::IgnoreAuth || err != tecNO_AUTH)
+                // A holder blocked by the asset's issuer is handled like an
+                // unauthorized one under clawback, except that the recreated
+                // MPToken is locked, since it only exists to be seized from.
+                bool const blocked = err == tecTOKEN_BLOCKED;
+                if (authHandling != AuthHandling::IgnoreAuth || (err != tecNO_AUTH && !blocked))
                 {
                     // Unreachable in practice. Normal withdraws (authHandling
                     // != IgnoreAuth) are rejected for unauthorized holders in
@@ -746,8 +750,16 @@ AMMWithdraw::withdraw(
                 // still receives the paired asset (accountSend only requires the
                 // MPToken to exist, not to be authorized); the balance remains
                 // gated by its issuer until that issuer authorizes it.
-                if (clawbackIssuer && asset.getIssuer() == *clawbackIssuer)
+                // A blocked holder's recreated MPToken is locked (it only
+                // exists for the issuer to seize from) and never authorized.
+                if (blocked)
+                {
+                    createFlags = lsfMPTLocked;
+                }
+                else if (clawbackIssuer && asset.getIssuer() == *clawbackIssuer)
+                {
                     createFlags = lsfMPTAuthorized;
+                }
             }
 
             if (auto const err = checkCreateMPT(view, mptIssue, account, {}, createFlags, journal);
